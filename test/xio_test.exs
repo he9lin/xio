@@ -119,7 +119,7 @@ defmodule ZIOTest do
         x1 <- ZIO.Fiber.join(f1)
         x2 <- ZIO.Fiber.join(f2)
 
-        return List.flatten([x1, x2])
+        return {x1, x2}
       end
     end
   end
@@ -144,5 +144,12 @@ defmodule ZIOTest do
     |> ZipPar.zip_par(async_zio)
     |> ZipPar.zip_par(async_zio)
     |> ZIO.run(& IO.inspect(&1))
+  end
+
+  test "fail" do
+    ZIO.fail("Failed!")
+    |> ZIO.flat_map(fn _ -> ZIO.print_line("OH YEAH") end)
+    |> ZIO.catch_all(fn e -> ZIO.print_line("Error: #{inspect e}") end)
+    |> ZIO.run(& &1)
   end
 end
