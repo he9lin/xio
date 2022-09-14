@@ -1,6 +1,9 @@
 defmodule ZIO do
   use Monad
 
+  @type zio :: term
+  @type error :: term
+
   defmodule Cause do
     defmodule Fail do
       defstruct [:error]
@@ -140,10 +143,12 @@ defmodule ZIO do
     map(zio, fn _ -> value end)
   end
 
+  @spec fold_cause_zio(zio, (Cause.t() -> zio), (term -> zio)) :: zio
   def fold_cause_zio(zio, failure, success) do
     %Fold{zio: zio, failure: failure, success: success}
   end
 
+  @spec fold_zio(zio, (error -> zio), (term -> zio)) :: zio
   def fold_zio(zio, failure, success) do
     failure = fn failure_cause ->
       case failure_cause do
@@ -222,7 +227,7 @@ defmodule ZIO do
   end
 
   def zip(zio1, zio2) do
-    zip_with(zio1, zio2, fn x1, x2 -> {x1, x2} end)
+    zip_with(zio1, zio2, fn x1, x2 -> ZIO.Zippable.zip(x1, x2) end)
   end
 
   def repeat(zio, n) do
@@ -245,29 +250,37 @@ defmodule ZIO do
     use GenServer
 
     defmodule State do
-      defstruct [:maybe_result, :callbacks]
+      defmodule Done do
+        defstruct [:exit]
+        @type t :: %__MODULE__{exit: Exit.t()}
+      end
+
+      defmodule Running do
+        @type callback :: (Exit.t() -> any)
+
+        defstruct [:callbacks]
+        @type t :: %__MODULE__{callbacks: [callback]}
+      end
+
+      @type t :: Done.t() | Running.t()
     end
 
-    def start_link(state \\ %State{maybe_result: nil, callbacks: []}) do
+    def start_link(state \\ %State.Running{callbacks: []}) do
       GenServer.start_link(__MODULE__, state)
     end
 
     def init(state), do: {:ok, state}
 
     def handle_cast({:add_callback, callback}, state) do
-      {:noreply, %State{state | callbacks: state.callbacks ++ [callback]}}
+      {:noreply, %{state | callbacks: state.callbacks ++ [callback]}}
     end
 
-    def handle_cast({:set_maybe_result, res}, state) do
-      {:noreply, %State{state | maybe_result: res}}
+    def handle_cast({:set_state, state}, _state) do
+      {:noreply, state}
     end
 
-    def handle_call(:callbacks, _from, state) do
-      {:reply, state.callbacks, state}
-    end
-
-    def handle_call(:maybe_result, _from, state) do
-      {:reply, state.maybe_result, state}
+    def handle_call(:get_state, _from, state) do
+      {:reply, state, state}
     end
 
     defstruct [:zio, :pid, :task]
@@ -277,12 +290,11 @@ defmodule ZIO do
 
       task =
         Task.async(fn ->
-          ZIO.run(zio, fn x ->
-            GenServer.cast(pid, {:set_maybe_result, x})
-            callbacks = GenServer.call(pid, :callbacks)
-
+          ZIO.run(zio, fn exit ->
+            %State.Running{callbacks: callbacks} = GenServer.call(pid, :get_state)
+            GenServer.cast(pid, {:set_state, %State.Done{exit: exit}})
             callbacks
-            |> Enum.each(fn callback -> callback.(x) end)
+            |> Enum.each(fn callback -> callback.(exit) end)
           end)
         end)
 
@@ -291,17 +303,17 @@ defmodule ZIO do
 
     def join(%__MODULE__{pid: pid, task: task}) do
       Task.await(task)
-      maybe_result = GenServer.call(pid, :maybe_result)
+      state = GenServer.call(pid, :get_state)
 
-      case maybe_result do
-        nil ->
+      case state do
+        %State.Done{exit: exit} ->
+          Process.exit(pid, :normal)
+          ZIO.done(exit)
+
+        %State.Running{} ->
           ZIO.async(fn continue ->
             GenServer.cast(pid, {:add_callback, continue})
           end)
-
-        x ->
-          Process.exit(pid, :normal)
-          ZIO.succeed_now(x)
       end
     end
   end
@@ -394,7 +406,7 @@ defmodule ZIO do
   # Cont: Any => ZIO
   defp continue(%State{stack: stack, callback: callback} = state, value) do
     if Enum.empty?(stack) do
-      complete(callback, value)
+      complete(callback, Exit.succeed(value))
       %{state | loop: false}
     else
       [cont | rest] = stack
