@@ -3,42 +3,44 @@ defmodule ZIOTest do
 
   def assert_zio(zio, expected) do
     zio
-    |> ZIO.run(&assert(&1 == expected))
+    |> ZIO.run(& assert(&1 == expected))
   end
 
-  def assert_zio_succeed(zio, expected) do
+  def run_zio(zio, expected) do
     zio
-    |> ZIO.run(& assert(&1 == ZIO.Exit.succeed(expected)))
+    |> ZIO.run(fn v -> 
+      IO.inspect ">>> expected: #{inspect expected} | actual: #{inspect v}"
+    end)
   end
 
   test "run flat_map" do
     ZIO.return(1)
     |> ZIO.flat_map(fn x -> ZIO.return(x + 1) end)
-    |> assert_zio_succeed(2)
+    |> run_zio(2)
   end
 
   test "run flat_map with succeed" do
     ZIO.return(1)
     |> ZIO.flat_map(fn x -> ZIO.succeed(fn -> x + 1 end) end)
-    |> assert_zio_succeed(2)
+    |> run_zio(2)
   end
 
   test "run map" do
     ZIO.return(1)
     |> ZIO.map(&(&1 + 1))
-    |> assert_zio_succeed(2)
+    |> run_zio(2)
   end
 
   test "run zip_with" do
     ZIO.return(1)
     |> ZIO.zip_with(ZIO.return(2), &(&1 + &2))
-    |> assert_zio_succeed(3)
+    |> run_zio(3)
   end
 
   test "run zip_right" do
     ZIO.return(1)
     |> ZIO.zip_right(ZIO.return(2))
-    |> assert_zio_succeed(2)
+    |> run_zio(2)
   end
 
   test "run ~> operator" do
@@ -46,13 +48,13 @@ defmodule ZIOTest do
 
     ZIO.return(1)
     ~> ZIO.return(2)
-    |> assert_zio_succeed(2)
+    |> run_zio(2)
   end
 
   test "run zip" do
     ZIO.return(1)
     |> ZIO.zip(ZIO.return(2))
-    |> assert_zio_succeed({1, 2})
+    |> run_zio({1, 2})
   end
 
   test "run repeat" do
@@ -75,7 +77,7 @@ defmodule ZIOTest do
         return({z, tuple})
       end
 
-    assert_zio_succeed(zio, {3, {8, "LO"}})
+    run_zio(zio, {3, {8, "LO"}})
   end
 
   test "async" do
@@ -100,7 +102,7 @@ defmodule ZIOTest do
         return({x, y})
       end
 
-    assert_zio_succeed(zio, {10, 20})
+    run_zio(zio, {10, 20})
   end
 
   test "fiber" do
@@ -110,7 +112,7 @@ defmodule ZIOTest do
       ZIO.async(fn callback ->
         IO.puts("Long running task")
         :timer.sleep(1000)
-        callback.(:rand.uniform(99))
+        callback.(1)
       end)
 
     zio =
@@ -124,7 +126,7 @@ defmodule ZIOTest do
       end
 
     zio
-    |> ZIO.run(&IO.inspect/1)
+    |> run_zio({1, 1})
   end
 
   defmodule ZipPar do
@@ -168,20 +170,20 @@ defmodule ZIOTest do
   test "fail" do
     ZIO.fail("Failed!")
     |> ZIO.flat_map(ZIO.print_line("OH YEAH"))
-    |> assert_zio(%ZIO.Exit.Failure{cause: %ZIO.Cause.Fail{error: "Failed!"}})
+    |> run_zio(%ZIO.Exit.Failure{cause: %ZIO.Cause.Fail{error: "Failed!"}})
   end
 
   test "fail with catch all" do
     ZIO.fail("Failed!")
     |> ZIO.flat_map(ZIO.print_line("OH YEAH"))
     |> ZIO.catch_all(fn _ -> ZIO.return(1) end)
-    |> assert_zio_succeed(1)
+    |> run_zio(1)
   end
 
   test "die" do
     ZIO.return("OK")
     |> ZIO.flat_map(fn _ -> raise("Oh oh") end)
-    |> assert_zio(%ZIO.Exit.Failure{
+    |> run_zio(%ZIO.Exit.Failure{
       cause: %ZIO.Cause.Die{throwable: %RuntimeError{message: "Oh oh"}}
     })
   end
@@ -196,7 +198,7 @@ defmodule ZIOTest do
       end,
       fn _ -> ZIO.return(0) end
     )
-    |> assert_zio_succeed(1)
+    |> run_zio(1)
   end
 
   test "ensuring" do

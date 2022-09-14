@@ -249,7 +249,7 @@ defmodule ZIO do
   defmodule Fiber do
     use GenServer
 
-    defmodule State do
+    defmodule FiberState do
       defmodule Done do
         defstruct [:exit]
         @type t :: %__MODULE__{exit: Exit.t()}
@@ -265,7 +265,9 @@ defmodule ZIO do
       @type t :: Done.t() | Running.t()
     end
 
-    def start_link(state \\ %State.Running{callbacks: []}) do
+    alias FiberState.{Done, Running}
+
+    def start_link(state \\ %Running{callbacks: []}) do
       GenServer.start_link(__MODULE__, state)
     end
 
@@ -291,8 +293,8 @@ defmodule ZIO do
       task =
         Task.async(fn ->
           ZIO.run(zio, fn exit ->
-            %State.Running{callbacks: callbacks} = GenServer.call(pid, :get_state)
-            GenServer.cast(pid, {:set_state, %State.Done{exit: exit}})
+            %Running{callbacks: callbacks} = GenServer.call(pid, :get_state)
+            GenServer.cast(pid, {:set_state, %Done{exit: exit}})
             callbacks
             |> Enum.each(fn callback -> callback.(exit) end)
           end)
@@ -301,20 +303,25 @@ defmodule ZIO do
       %__MODULE__{zio: zio, pid: pid, task: task}
     end
 
-    def join(%__MODULE__{pid: pid, task: task}) do
+    def await(%__MODULE__{pid: pid, task: task}, continue) do
       Task.await(task)
       state = GenServer.call(pid, :get_state)
 
       case state do
-        %State.Done{exit: exit} ->
+        %Done{exit: exit} ->
           Process.exit(pid, :normal)
-          ZIO.done(exit)
+          continue.(exit)
 
-        %State.Running{} ->
-          ZIO.async(fn continue ->
-            GenServer.cast(pid, {:add_callback, continue})
-          end)
+        %Running{} ->
+          GenServer.cast(pid, {:add_callback, continue})
       end
+    end
+
+    def join(%__MODULE__{} = fiber) do
+      ZIO.async(fn continue ->
+        await(fiber, continue)
+      end)
+      |> ZIO.flat_map(&ZIO.done/1)
     end
   end
 
@@ -415,8 +422,8 @@ defmodule ZIO do
     end
   end
 
-  defp complete(callback, value) do
-    callback.(value)
+  defp complete(callback, exit) do
+    callback.(exit)
   end
 
   defp push_stack(stack, value) do
