@@ -149,7 +149,20 @@ defmodule ZIOTest do
   test "fail" do
     ZIO.fail("Failed!")
     |> ZIO.flat_map(fn _ -> ZIO.print_line("OH YEAH") end)
-    |> ZIO.catch_all(fn e -> ZIO.print_line("Error: #{inspect e}") end)
-    |> ZIO.run(& &1)
+    |> ZIO.run(& IO.inspect &1)
+  end
+
+  test "fail with catch all" do
+    ZIO.fail("Failed!")
+    |> ZIO.flat_map(fn _ -> ZIO.print_line("OH YEAH") end)
+    |> ZIO.catch_all(fn _ -> ZIO.return(1) end)
+    |> assert_zio(1)
+  end
+
+  test "die" do
+    ZIO.return("OK")
+    |> ZIO.flat_map(fn _ -> raise("Oh oh") end)
+    |> ZIO.catch_all(fn _ -> ZIO.return(1) end)
+    |> ZIO.run(& IO.inspect(&1))
   end
 end

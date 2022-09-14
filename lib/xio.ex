@@ -1,6 +1,52 @@
 defmodule ZIO do
   use Monad
 
+  defmodule Cause do
+    defmodule Fail do
+      defstruct [:error]
+      @type t :: %__MODULE__{error: term}
+    end
+
+    defmodule Die do
+      defstruct [:throwable]
+      @type t :: %__MODULE__{throwable: term}
+    end
+
+    defmodule Interrupt do
+      defstruct []
+      @type t :: %__MODULE__{}
+    end
+
+    def die(throwable), do: %Die{throwable: throwable}
+    def fail(error), do: %Fail{error: error}
+
+    @type t :: Fail.t() | Die.t() | Interrupt.t()
+  end
+
+  defmodule Exit do
+    defmodule Success do
+      defstruct [:value]
+      @type t :: %__MODULE__{value: term}
+    end
+
+    defmodule Failure do
+      defstruct [:cause]
+      @type t :: %__MODULE__{cause: Cause.t()}
+    end
+
+    def succeed(value) do
+      %Success{value: value}
+    end
+
+    def fail(error) do
+      %Failure{cause: %Cause.Fail{error: error}}
+    end
+
+    def die(throwable) do
+      %Failure{cause: %Cause.Die{throwable: throwable}}
+    end
+  end
+
   defmodule SucceedNow do
     defstruct [:value]
     @type t :: %__MODULE__{value: term}
@@ -19,8 +65,8 @@ defmodule ZIO do
   defmodule Async do
     defstruct [:register]
 
-    # (A => Any) => Any
-    @type t :: %__MODULE__{register: term}
+    @type register :: ((any -> any) -> any)
+    @type t :: %__MODULE__{register: register}
   end
 
   defmodule Fork do
@@ -29,7 +75,7 @@ defmodule ZIO do
   end
 
   defmodule Fail do
-    @type e :: (() -> term)
+    @type e :: (() -> Cause.t())
 
     defstruct [:e]
     @type t :: %__MODULE__{e: e}
@@ -37,7 +83,12 @@ defmodule ZIO do
 
   defmodule Fold do
     defstruct [:zio, :failure, :success]
-    @type t :: %__MODULE__{zio: term, failure: term, success: term}
+
+    @type zio :: term
+    @type failure :: (Cause.t() -> zio)
+    @type success :: (term -> zio)
+
+    @type t :: %__MODULE__{zio: term, failure: failure, success: success}
   end
 
   def succeed_now(value) do
@@ -76,12 +127,43 @@ defmodule ZIO do
     map(zio, fn _ -> value end)
   end
 
-  def fold_zio(zio, failure, sucess) do
-    %Fold{zio: zio, failure: failure, success: sucess}
+  def fold_cause_zio(zio, failure, success) do
+    %Fold{zio: zio, failure: failure, success: success}
+  end
+
+  def fold_zio(zio, failure, success) do
+    failure = fn failure_cause ->
+      case failure_cause do
+        %Cause.Fail{error: error} -> failure.(error)
+        %Cause.Die{throwable: throwable} -> fail_cause(Cause.die(throwable))
+      end
+    end
+
+    fold_cause_zio(
+      zio,
+      failure,
+      success
+    )
+  end
+
+  def fail_cause(cause) do
+    %Fail{e: fn -> cause end}
   end
 
   def fail(e) do
-    %Fail{e: fn -> e end}
+    fail_cause(%Cause.Fail{error: e})
+  end
+
+  def die(e) do
+    fail_cause(%Cause.Die{throwable: e})
+  end
+
+  def done(%Exit.Success{value: value}) do
+    succeed_now(value)
+  end
+
+  def done(%Exit.Failure{cause: cause}) do
+    fail_cause(cause)
   end
 
   def fold(zio, failure, success) do
@@ -221,44 +303,49 @@ defmodule ZIO do
 
   defp resume(%State{current_zio: current_zio, stack: stack, callback: callback} = state) do
     state =
-      case current_zio do
-        %SucceedNow{value: value} ->
-          continue(state, value)
+      try do
+        case current_zio do
+          %SucceedNow{value: value} ->
+            continue(state, value)
 
-        %Suceeed{thunk: thunk} ->
-          continue(state, thunk.())
+          %Suceeed{thunk: thunk} ->
+            continue(state, thunk.())
 
-        %FlatMap{zio: zio, cont: cont} ->
-          stack = push_stack(stack, cont)
-          %State{state | stack: stack, current_zio: zio}
+          %FlatMap{zio: zio, cont: cont} ->
+            stack = push_stack(stack, cont)
+            %State{state | stack: stack, current_zio: zio}
 
-        %Async{register: register} ->
-          if Enum.empty?(stack) do
-            register.(fn a -> 
-              complete(callback, a) 
-            end)
-            %{state | loop: false}
-          else
-            register.(fn a ->
-              current_zio = succeed_now(a)
+          %Async{register: register} ->
+            if Enum.empty?(stack) do
+              register.(fn a -> 
+                complete(callback, Exit.succeed(a)) 
+              end)
+              %{state | loop: false}
+            else
+              register.(fn a ->
+                current_zio = succeed_now(a)
 
-              %State{state | current_zio: current_zio, loop: true}
-              |> resume()
-            end)
+                %State{state | current_zio: current_zio, loop: true}
+                |> resume()
+              end)
 
-            %{state | loop: false}
-          end
+              %{state | loop: false}
+            end
 
-        %Fork{zio: zio} ->
-          fiber = Fiber.start(zio)
-          continue(state, fiber)
+          %Fork{zio: zio} ->
+            fiber = Fiber.start(zio)
+            continue(state, fiber)
 
-        %Fold{zio: zio, failure: _failure, success: _success} = fold ->
-          stack = push_stack(stack, fold)
-          %{state | stack: stack, current_zio: zio}
+          %Fold{zio: zio, failure: _failure, success: _success} = fold ->
+            stack = push_stack(stack, fold)
+            %{state | stack: stack, current_zio: zio}
 
-        %Fail{e: e} ->
-          with_error_handler(state, e)
+          %Fail{e: e} ->
+            with_error_handler(state, e)
+        end
+      rescue 
+        e -> 
+          %{state | current_zio: die(e)}
       end
 
     resume(state)
@@ -267,7 +354,8 @@ defmodule ZIO do
   def with_error_handler(%State{stack: stack, callback: callback} = state, e) do
     case pop_stack(stack) do
       { nil, _stack } -> 
-        complete(callback, e.())
+        complete(callback, %Exit.Failure{cause: e.()})
+        %{state | loop: false}
       { %Fold{} = error_handler, stack } ->
         %{ state | stack: stack, current_zio: error_handler.failure.(e.()) }
       { _, stack } ->
