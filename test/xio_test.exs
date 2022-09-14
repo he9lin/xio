@@ -148,13 +148,13 @@ defmodule ZIOTest do
 
   test "fail" do
     ZIO.fail("Failed!")
-    |> ZIO.flat_map(fn _ -> ZIO.print_line("OH YEAH") end)
+    |> ZIO.flat_map(ZIO.print_line("OH YEAH"))
     |> ZIO.run(& IO.inspect &1)
   end
 
   test "fail with catch all" do
     ZIO.fail("Failed!")
-    |> ZIO.flat_map(fn _ -> ZIO.print_line("OH YEAH") end)
+    |> ZIO.flat_map(ZIO.print_line("OH YEAH"))
     |> ZIO.catch_all(fn _ -> ZIO.return(1) end)
     |> assert_zio(1)
   end
@@ -162,7 +162,23 @@ defmodule ZIOTest do
   test "die" do
     ZIO.return("OK")
     |> ZIO.flat_map(fn _ -> raise("Oh oh") end)
-    |> ZIO.catch_all(fn _ -> ZIO.return(1) end)
     |> ZIO.run(& IO.inspect(&1))
+  end
+
+  test "die with catch all" do
+    ZIO.return("OK")
+    |> ZIO.flat_map(fn _ -> raise("Oh oh") end)
+    |> ZIO.catch_all(fn e -> ZIO.print_line("CATCH IT: #{inspect e}") end)
+    |> ZIO.fold_cause_zio(
+      fn c -> ZIO.print_line("Recovered from a cause #{inspect c}") |> ZIO.zip_right(ZIO.return(1)) end, 
+      fn _ -> ZIO.return(0) end)
+    |> assert_zio(1)
+  end
+
+  test "ensuring" do
+    ZIO.fail("Failed!")
+    |> ZIO.ensuring(ZIO.print_line("Ensuring"))
+    |> ZIO.flat_map(ZIO.print_line("OH YEAH"))
+    |> ZIO.run(& IO.inspect &1)
   end
 end

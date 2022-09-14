@@ -91,6 +91,19 @@ defmodule ZIO do
     @type t :: %__MODULE__{zio: term, failure: failure, success: success}
   end
 
+  defmodule Provide do
+    defstruct [:zio, :env]
+  end
+
+  defmodule Access do
+    @type env :: term
+    @type zio :: term
+    @type f :: (env -> zio)
+
+    defstruct [:f]
+    @type t :: %__MODULE__{f: f}
+  end
+
   def succeed_now(value) do
     %SucceedNow{value: value}
   end
@@ -182,6 +195,14 @@ defmodule ZIO do
     )
   end
 
+  def ensuring(zio, finalizer) do
+    fold_cause_zio(
+      zio,
+      fn cause -> finalizer |> zip_right(fail_cause(cause)) end,
+      fn x -> finalizer |> zip_right(succeed_now(x)) end
+    )
+  end
+
   def zip_with(zio1, zio2, f) do
     flat_map(zio1, fn x1 ->
       flat_map(zio2, fn x2 ->
@@ -210,6 +231,10 @@ defmodule ZIO do
     else
       zip_with(zio, repeat(zio, n - 1), fn _, _ -> nil end)
     end
+  end
+
+  def provide(zio, env) do
+    %Provide{zio: zio, env: env}
   end
 
   def print_line(message) do
@@ -317,9 +342,10 @@ defmodule ZIO do
 
           %Async{register: register} ->
             if Enum.empty?(stack) do
-              register.(fn a -> 
-                complete(callback, Exit.succeed(a)) 
+              register.(fn a ->
+                complete(callback, Exit.succeed(a))
               end)
+
               %{state | loop: false}
             else
               register.(fn a ->
@@ -343,8 +369,8 @@ defmodule ZIO do
           %Fail{e: e} ->
             with_error_handler(state, e)
         end
-      rescue 
-        e -> 
+      rescue
+        e ->
           %{state | current_zio: die(e)}
       end
 
@@ -353,12 +379,14 @@ defmodule ZIO do
 
   def with_error_handler(%State{stack: stack, callback: callback} = state, e) do
     case pop_stack(stack) do
-      { nil, _stack } -> 
+      {nil, []} ->
         complete(callback, %Exit.Failure{cause: e.()})
         %{state | loop: false}
-      { %Fold{} = error_handler, stack } ->
-        %{ state | stack: stack, current_zio: error_handler.failure.(e.()) }
-      { _, stack } ->
+
+      {%Fold{} = error_handler, stack} ->
+        %{state | stack: stack, current_zio: error_handler.failure.(e.())}
+
+      {_, stack} ->
         with_error_handler(%{state | stack: stack}, e)
     end
   end
@@ -383,11 +411,11 @@ defmodule ZIO do
     List.insert_at(stack, 0, value)
   end
 
-  defp pop_stack([ cont | rest ]) do
-    { cont, rest }
+  defp pop_stack([cont | rest]) do
+    {cont, rest}
   end
 
   defp pop_stack([]) do
-    { nil, [] }
+    {nil, []}
   end
 end
