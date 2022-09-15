@@ -123,6 +123,18 @@ defmodule ZIO do
     %FlatMap{zio: zio, cont: cont}
   end
 
+  def access_zio(f) do
+    %Access{f: f}
+  end
+
+  def environment() do
+    access_zio(fn env -> succeed_now(env) end)
+  end
+
+  def provide(zio, env) do
+    %Provide{zio: zio, env: env}
+  end
+
   def async(register) do
     %Async{register: register}
   end
@@ -238,10 +250,6 @@ defmodule ZIO do
     end
   end
 
-  def provide(zio, env) do
-    %Provide{zio: zio, env: env}
-  end
-
   def print_line(message) do
     succeed(fn -> IO.puts(message) end)
   end
@@ -326,13 +334,14 @@ defmodule ZIO do
   end
 
   defmodule State do
-    @enforce_keys [:stack, :current_zio, :loop, :callback]
-    defstruct stack: [], current_zio: nil, loop: true, callback: nil
+    @enforce_keys [:stack, :env_stack, :current_zio, :loop, :callback]
+    defstruct stack: [], env_stack: [], current_zio: nil, loop: true, callback: nil
   end
 
   def run(xio, callback) do
     state = %State{
       stack: [],
+      env_stack: [],
       current_zio: xio,
       loop: true,
       callback: callback
@@ -345,7 +354,7 @@ defmodule ZIO do
     :ok
   end
 
-  defp resume(%State{current_zio: current_zio, stack: stack, callback: callback} = state) do
+  defp resume(%State{current_zio: current_zio, stack: stack, env_stack: env_stack, callback: callback} = state) do
     state =
       try do
         case current_zio do
@@ -387,6 +396,22 @@ defmodule ZIO do
 
           %Fail{e: e} ->
             with_error_handler(state, e)
+
+          %Provide{zio: zio, env: env} ->
+            env_stack = push_stack(env_stack, env)
+             
+            ensuring_zio = succeed(fn -> 
+              { env, _env_stack } = pop_stack(env_stack) 
+              env
+            end)
+
+            current_zio =  zio |> ensuring(ensuring_zio)
+            %{state | env_stack: env_stack, current_zio: current_zio}
+
+          %Access{f: f} ->
+            [head | _] = env_stack
+            current_zio = f.(head)
+            %{state | current_zio: current_zio}
         end
       rescue
         e ->
@@ -410,15 +435,20 @@ defmodule ZIO do
     end
   end
 
-  # Cont: Any => ZIO
   defp continue(%State{stack: stack, callback: callback} = state, value) do
     if Enum.empty?(stack) do
       complete(callback, Exit.succeed(value))
       %{state | loop: false}
     else
+      # cont can be a Fold or (any -> zio)
       [cont | rest] = stack
-      current_zio = cont.(value)
-      %{state | stack: rest, current_zio: current_zio}
+      case cont do
+        %Fold{} ->
+          %{state | stack: rest, current_zio: cont.success.(value)}
+
+        _ ->
+          %{state | stack: rest, current_zio: cont.(value)}
+      end
     end
   end
 

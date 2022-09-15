@@ -1,15 +1,10 @@
 defmodule ZIOTest do
   use ExUnit.Case, async: true
 
-  def assert_zio(zio, expected) do
-    zio
-    |> ZIO.run(& assert(&1 == expected))
-  end
-
   def run_zio(zio, expected) do
     zio
     |> ZIO.run(fn v -> 
-      IO.inspect ">>> expected: #{inspect expected} | actual: #{inspect v}"
+      IO.puts "EXPECTED: #{inspect expected} \nACTUAL: #{inspect v}"
     end)
   end
 
@@ -205,6 +200,36 @@ defmodule ZIOTest do
     ZIO.fail("Failed!")
     |> ZIO.ensuring(ZIO.print_line("Ensuring"))
     |> ZIO.flat_map(ZIO.print_line("OH YEAH"))
+    |> ZIO.run(&IO.inspect/1)
+  end
+
+  test "provide" do
+    zio = ZIO.access_zio(fn n -> ZIO.print_line("Hello #{n}") end)
+    zio 
+    |> ZIO.provide(1) 
+    |> ZIO.run(&IO.inspect/1)
+  end
+
+  test "provide with fail" do
+    zio = ZIO.access_zio(fn n -> ZIO.print_line("Hello #{n}") end)
+    zio 
+    |> ZIO.flat_map(fn _ -> ZIO.fail("Failed!") end)
+    |> ZIO.provide(1) 
+    |> ZIO.run(&IO.inspect/1)
+  end
+
+  test "environoment" do
+    require ZIO
+
+    zio =
+      ZIO.m do
+        env <- ZIO.environment()
+        _ <- ZIO.print_line("Hello #{env}")
+        return env
+      end
+
+    zio
+    |> ZIO.provide(1) 
     |> ZIO.run(&IO.inspect/1)
   end
 end
