@@ -1,54 +1,12 @@
 defmodule ZIO do
   use Monad
 
+  alias ZIO.{Cause, Exit, Fiber, Stack}
+
   @type zio :: term
   @type error :: term
 
-  defmodule Cause do
-    defmodule Fail do
-      defstruct [:error]
-      @type t :: %__MODULE__{error: term}
-    end
-
-    defmodule Die do
-      defstruct [:throwable]
-      @type t :: %__MODULE__{throwable: term}
-    end
-
-    defmodule Interrupt do
-      defstruct []
-      @type t :: %__MODULE__{}
-    end
-
-    def die(throwable), do: %Die{throwable: throwable}
-    def fail(error), do: %Fail{error: error}
-
-    @type t :: Fail.t() | Die.t() | Interrupt.t()
-  end
-
-  defmodule Exit do
-    defmodule Success do
-      defstruct [:value]
-      @type t :: %__MODULE__{value: term}
-    end
-
-    defmodule Failure do
-      defstruct [:cause]
-      @type t :: %__MODULE__{cause: Cause.t()}
-    end
-
-    def succeed(value) do
-      %Success{value: value}
-    end
-
-    def fail(error) do
-      %Failure{cause: %Cause.Fail{error: error}}
-    end
-
-    def die(throwable) do
-      %Failure{cause: %Cause.Die{throwable: throwable}}
-    end
-  end
+  ## ADTs
 
   defmodule SucceedNow do
     defstruct [:value]
@@ -106,6 +64,8 @@ defmodule ZIO do
     defstruct [:f]
     @type t :: %__MODULE__{f: f}
   end
+
+  ## Combinators
 
   def succeed_now(value) do
     %SucceedNow{value: value}
@@ -232,12 +192,6 @@ defmodule ZIO do
     zip_with(zio1, zio2, fn _, x2 -> x2 end)
   end
 
-  defmodule Operator do
-    def zio1 ~> zio2 do
-      ZIO.zip_right(zio1, zio2)
-    end
-  end
-
   def zip(zio1, zio2) do
     zip_with(zio1, zio2, fn x1, x2 -> ZIO.Zippable.zip(x1, x2) end)
   end
@@ -254,88 +208,9 @@ defmodule ZIO do
     succeed(fn -> IO.puts(message) end)
   end
 
-  defmodule Fiber do
-    use GenServer
-
-    defmodule FiberState do
-      defmodule Done do
-        defstruct [:exit]
-        @type t :: %__MODULE__{exit: Exit.t()}
-      end
-
-      defmodule Running do
-        @type callback :: (Exit.t() -> any)
-
-        defstruct [:callbacks]
-        @type t :: %__MODULE__{callbacks: [callback]}
-      end
-
-      @type t :: Done.t() | Running.t()
-    end
-
-    alias FiberState.{Done, Running}
-
-    def start_link(state \\ %Running{callbacks: []}) do
-      GenServer.start_link(__MODULE__, state)
-    end
-
-    def init(state), do: {:ok, state}
-
-    def handle_cast({:add_callback, callback}, state) do
-      {:noreply, %{state | callbacks: state.callbacks ++ [callback]}}
-    end
-
-    def handle_cast({:set_state, state}, _state) do
-      {:noreply, state}
-    end
-
-    def handle_call(:get_state, _from, state) do
-      {:reply, state, state}
-    end
-
-    defstruct [:zio, :pid, :task]
-
-    def start(zio) do
-      {:ok, pid} = start_link()
-
-      task =
-        Task.async(fn ->
-          ZIO.run(zio, fn exit ->
-            %Running{callbacks: callbacks} = GenServer.call(pid, :get_state)
-            GenServer.cast(pid, {:set_state, %Done{exit: exit}})
-            callbacks
-            |> Enum.each(fn callback -> callback.(exit) end)
-          end)
-        end)
-
-      %__MODULE__{zio: zio, pid: pid, task: task}
-    end
-
-    def await(%__MODULE__{pid: pid, task: task}, continue) do
-      Task.await(task)
-      state = GenServer.call(pid, :get_state)
-
-      case state do
-        %Done{exit: exit} ->
-          Process.exit(pid, :normal)
-          continue.(exit)
-
-        %Running{} ->
-          GenServer.cast(pid, {:add_callback, continue})
-      end
-    end
-
-    def join(%__MODULE__{} = fiber) do
-      ZIO.async(fn continue ->
-        await(fiber, continue)
-      end)
-      |> ZIO.flat_map(&ZIO.done/1)
-    end
-  end
-
   defmodule State do
     @enforce_keys [:stack, :env_stack, :current_zio, :loop, :callback]
-    defstruct stack: [], env_stack: [], current_zio: nil, loop: true, callback: nil
+    defstruct [:stack, :env_stack, :current_zio, :loop, :callback]
   end
 
   def run(xio, callback) do
@@ -365,7 +240,7 @@ defmodule ZIO do
             continue(state, thunk.())
 
           %FlatMap{zio: zio, cont: cont} ->
-            stack = push_stack(stack, cont)
+            stack = Stack.push(stack, cont)
             %State{state | stack: stack, current_zio: zio}
 
           %Async{register: register} ->
@@ -391,17 +266,17 @@ defmodule ZIO do
             continue(state, fiber)
 
           %Fold{zio: zio, failure: _failure, success: _success} = fold ->
-            stack = push_stack(stack, fold)
+            stack = Stack.push(stack, fold)
             %{state | stack: stack, current_zio: zio}
 
           %Fail{e: e} ->
             with_error_handler(state, e)
 
           %Provide{zio: zio, env: env} ->
-            env_stack = push_stack(env_stack, env)
+            env_stack = Stack.push(env_stack, env)
              
             ensuring_zio = succeed(fn -> 
-              { env, _env_stack } = pop_stack(env_stack) 
+              { env, _env_stack } = Stack.pop(env_stack) 
               env
             end)
 
@@ -409,9 +284,13 @@ defmodule ZIO do
             %{state | env_stack: env_stack, current_zio: current_zio}
 
           %Access{f: f} ->
-            [head | _] = env_stack
-            current_zio = f.(head)
-            %{state | current_zio: current_zio}
+            case env_stack do
+              [head | _] ->
+                current_zio = f.(head)
+                %{state | current_zio: current_zio}
+              _ ->
+                raise "No environment available"
+            end
         end
       rescue
         e ->
@@ -419,20 +298,6 @@ defmodule ZIO do
       end
 
     resume(state)
-  end
-
-  def with_error_handler(%State{stack: stack, callback: callback} = state, e) do
-    case pop_stack(stack) do
-      {nil, []} ->
-        complete(callback, %Exit.Failure{cause: e.()})
-        %{state | loop: false}
-
-      {%Fold{} = error_handler, stack} ->
-        %{state | stack: stack, current_zio: error_handler.failure.(e.())}
-
-      {_, stack} ->
-        with_error_handler(%{state | stack: stack}, e)
-    end
   end
 
   defp continue(%State{stack: stack, callback: callback} = state, value) do
@@ -456,15 +321,17 @@ defmodule ZIO do
     callback.(exit)
   end
 
-  defp push_stack(stack, value) do
-    List.insert_at(stack, 0, value)
-  end
+  defp with_error_handler(%State{stack: stack, callback: callback} = state, e) do
+    case Stack.pop(stack) do
+      {nil, []} ->
+        complete(callback, %Exit.Failure{cause: e.()})
+        %{state | loop: false}
 
-  defp pop_stack([cont | rest]) do
-    {cont, rest}
-  end
+      {%Fold{} = error_handler, stack} ->
+        %{state | stack: stack, current_zio: error_handler.failure.(e.())}
 
-  defp pop_stack([]) do
-    {nil, []}
+      {_, stack} ->
+        with_error_handler(%{state | stack: stack}, e)
+    end
   end
 end

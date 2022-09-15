@@ -229,7 +229,7 @@ defmodule ZIOTest do
       end
 
     zio
-    |> ZIO.provide(1) 
+    # |> ZIO.provide(1) 
     |> ZIO.run(&IO.inspect/1)
   end
 end
