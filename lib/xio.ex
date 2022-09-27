@@ -1,7 +1,7 @@
 defmodule ZIO do
   use Monad
 
-  alias ZIO.{Cause, Exit, Fiber, Stack}
+  alias ZIO.{Cause, Exit, Stack}
 
   @type zio :: term
   @type error :: term
@@ -21,18 +21,6 @@ defmodule ZIO do
   defmodule FlatMap do
     defstruct [:zio, :cont]
     @type t :: %__MODULE__{cont: term}
-  end
-
-  defmodule Async do
-    defstruct [:register]
-
-    @type register :: ((any -> any) -> any)
-    @type t :: %__MODULE__{register: register}
-  end
-
-  defmodule Fork do
-    defstruct [:zio]
-    @type t :: %__MODULE__{zio: term}
   end
 
   defmodule Fail do
@@ -93,14 +81,6 @@ defmodule ZIO do
 
   def provide(zio, env) do
     %Provide{zio: zio, env: env}
-  end
-
-  def async(register) do
-    %Async{register: register}
-  end
-
-  def fork(zio) do
-    %Fork{zio: zio}
   end
 
   def bind(zio, cont) do
@@ -229,7 +209,7 @@ defmodule ZIO do
     :ok
   end
 
-  defp resume(%State{current_zio: current_zio, stack: stack, env_stack: env_stack, callback: callback} = state) do
+  defp resume(%State{current_zio: current_zio, stack: stack, env_stack: env_stack} = state) do
     state =
       try do
         case current_zio do
@@ -242,28 +222,6 @@ defmodule ZIO do
           %FlatMap{zio: zio, cont: cont} ->
             stack = Stack.push(stack, cont)
             %State{state | stack: stack, current_zio: zio}
-
-          %Async{register: register} ->
-            if Enum.empty?(stack) do
-              register.(fn a ->
-                complete(callback, Exit.succeed(a))
-              end)
-
-              %{state | loop: false}
-            else
-              register.(fn a ->
-                current_zio = succeed_now(a)
-
-                %State{state | current_zio: current_zio, loop: true}
-                |> resume()
-              end)
-
-              %{state | loop: false}
-            end
-
-          %Fork{zio: zio} ->
-            fiber = Fiber.start(zio)
-            continue(state, fiber)
 
           %Fold{zio: zio, failure: _failure, success: _success} = fold ->
             stack = Stack.push(stack, fold)
@@ -289,12 +247,18 @@ defmodule ZIO do
                 current_zio = f.(head)
                 %{state | current_zio: current_zio}
               _ ->
-                raise "No environment available"
+                raise "No environment provided"
             end
         end
       rescue
+        e in ExUnit.AssertionError ->
+          raise e
         e ->
-          %{state | current_zio: die(e)}
+          if Enum.empty?(stack) do
+            raise e
+          else
+            %{state | current_zio: die(e)}
+          end
       end
 
     resume(state)
@@ -318,7 +282,7 @@ defmodule ZIO do
   end
 
   defp complete(callback, exit) do
-    callback.(exit)
+    callback.(ZIO.done(exit))
   end
 
   defp with_error_handler(%State{stack: stack, callback: callback} = state, e) do
