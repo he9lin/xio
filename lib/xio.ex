@@ -10,7 +10,7 @@ defmodule ZIO do
 
   defmodule SucceedNow do
     defstruct [:value]
-    @type t :: %__MODULE__{value: term}
+    @type t(value) :: %__MODULE__{value: value}
   end
 
   defmodule Suceeed do
@@ -53,6 +53,8 @@ defmodule ZIO do
     @type t :: %__MODULE__{f: f}
   end
 
+  @type t(value, error) :: SucceedNow.t(value) | Succeed.t | FlatMap.t | Fail.t(error) | Fold.t | Provide.t | Access.t
+
   ## Combinators
 
   def succeed_now(value) do
@@ -79,6 +81,13 @@ defmodule ZIO do
     access_zio(fn env -> succeed_now(env) end)
   end
 
+  def environment(dep_key) do
+    access_zio(fn env -> 
+      specific_env = ZIO.Env.get(env, dep_key)
+      succeed_now(specific_env) 
+    end)
+  end
+
   def provide(zio, env) do
     %Provide{zio: zio, env: env}
   end
@@ -91,8 +100,20 @@ defmodule ZIO do
     flat_map(zio, fn x -> succeed_now(f.(x)) end)
   end
 
+  def map_error(zio, f) do
+    fold_zio(zio, fn cause -> fail(f.(cause)) end, fn x -> succeed_now(x) end)
+  end
+
   def as(zio, value) do
     map(zio, fn _ -> value end)
+  end
+
+  def from_either({:ok, value}) do
+    succeed_now(value)
+  end
+
+  def from_either({:error, error}) do
+    fail(error)
   end
 
   @spec fold_cause_zio(zio, (Cause.t() -> zio), (term -> zio)) :: zio
@@ -114,6 +135,10 @@ defmodule ZIO do
       failure,
       success
     )
+  end
+
+  def handle_error(zio, f) do
+    fold_zio(zio, f, fn x -> succeed_now(x) end)
   end
 
   def fail_cause(cause) do
@@ -184,13 +209,48 @@ defmodule ZIO do
     end
   end
 
+  def filter(list, f) do
+    list
+    |> Enum.reverse()
+    |> Enum.reduce(succeed_now([]), fn item, acc ->
+      zip_with(f.(item), acc, fn x, acc ->
+        if x do
+          [item | acc]
+        else
+          acc
+        end
+      end)
+    end)
+  end
+
+  def find(list, f) do
+    index = 0
+    loop(list, index, f)
+  end
+
+  def loop(list, index, f) do
+    length = Enum.count(list)
+    if index < length do
+      item = Enum.at(list, index)
+      f.(item) |> ZIO.flat_map(fn x ->
+        if x do
+          succeed_now(item)
+        else
+          loop(list, index + 1, f)
+        end
+      end)
+    else
+      succeed_now(nil)
+    end
+  end
+
   def print_line(message) do
     succeed(fn -> IO.puts(message) end)
   end
 
   defmodule State do
-    @enforce_keys [:stack, :env_stack, :current_zio, :loop, :callback]
-    defstruct [:stack, :env_stack, :current_zio, :loop, :callback]
+    @enforce_keys [:stack, :env_stack, :current_zio, :loop, :callback, :result]
+    defstruct [:stack, :env_stack, :current_zio, :loop, :callback, :result]
   end
 
   def run(xio, callback) do
@@ -199,14 +259,28 @@ defmodule ZIO do
       env_stack: [],
       current_zio: xio,
       loop: true,
-      callback: callback
+      callback: callback,
+      result: nil
     }
 
     resume(state)
   end
 
-  defp resume(%State{loop: false}) do
-    :ok
+  def run_zio(xio) do
+    case run(xio, fn x -> x end) do
+      %ZIO.Exit.Success{value: value} -> {:ok, value}
+      %ZIO.Exit.Failure{cause: cause} -> {:error, cause}
+    end
+  end
+
+  def run_with(zio, env) do
+    zio
+    |> provide(env)
+    |> run_zio()
+  end
+
+  defp resume(%State{loop: false, result: result}) do
+    result
   end
 
   defp resume(%State{current_zio: current_zio, stack: stack, env_stack: env_stack} = state) do
@@ -266,8 +340,9 @@ defmodule ZIO do
 
   defp continue(%State{stack: stack, callback: callback} = state, value) do
     if Enum.empty?(stack) do
-      complete(callback, Exit.succeed(value))
-      %{state | loop: false}
+      result = Exit.succeed(value)
+      complete(callback, result)
+      %{state | loop: false, result: result}
     else
       # cont can be a Fold or (any -> zio)
       [cont | rest] = stack
@@ -288,8 +363,9 @@ defmodule ZIO do
   defp with_error_handler(%State{stack: stack, callback: callback} = state, e) do
     case Stack.pop(stack) do
       {nil, []} ->
-        complete(callback, %Exit.Failure{cause: e.()})
-        %{state | loop: false}
+        result = %Exit.Failure{cause: e.()}
+        complete(callback, result)
+        %{state | loop: false, result: result}
 
       {%Fold{} = error_handler, stack} ->
         %{state | stack: stack, current_zio: error_handler.failure.(e.())}

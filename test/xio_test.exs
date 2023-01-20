@@ -1,5 +1,6 @@
 defmodule ZIOTest do
   use ExUnit.Case, async: true
+  alias ZIO.Env
 
   test "run flat_map" do
     ZIO.return(1)
@@ -17,6 +18,26 @@ defmodule ZIOTest do
     ZIO.return(1)
     |> ZIO.map(&(&1 + 1))
     |> assert_zio_success(2)
+  end
+
+  test "run with result" do
+    result =
+      ZIO.return(1)
+      |> ZIO.map(&(&1 + 1))
+      |> ZIO.run(fn x -> x end)
+    assert result == %ZIO.Exit.Success{value: 2}
+  end
+
+  test "run map_error" do
+    ZIO.return(1)
+    |> ZIO.map_error(&(&1 + 1))
+    |> assert_zio_success(1)
+  end
+
+  test "run map_error with error" do
+    ZIO.fail(1)
+    |> ZIO.map_error(&(&1 + 1))
+    |> assert_zio_failure(%ZIO.Cause.Fail{error: 2})
   end
 
   test "run zip_with" do
@@ -128,7 +149,37 @@ defmodule ZIOTest do
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 
-  test "environoment" do
+  test "environment" do
+    require ZIO
+
+    zio =
+      ZIO.m do
+        env <- ZIO.environment()
+        _ <- ZIO.print_line("Hello #{env}")
+        return env
+      end
+
+    zio
+    |> ZIO.provide("World")
+    |> assert_zio_success("World")
+  end
+
+  test "access specific environment" do
+    require ZIO
+
+    zio =
+      ZIO.m do
+        env <- ZIO.environment(:http_client)
+        _ <- ZIO.print_line("Hello #{env}")
+        return env
+      end
+
+    zio
+    |> ZIO.provide(Env.new(:http_client, "World"))
+    |> assert_zio_success("World")
+  end
+
+  test "environment with failure" do
     require ZIO
 
     zio =
@@ -140,6 +191,18 @@ defmodule ZIOTest do
 
     zio
     |> assert_zio_failure(%ZIO.Cause.Die{throwable: %RuntimeError{message: "No environment provided"}})
+  end
+
+  test "filter" do
+    [1,2,3]
+    |> ZIO.filter(fn x -> ZIO.return(x > 1) end)
+    |> assert_zio_success([2,3])
+  end
+
+  test "find" do
+    [1,2,3,4,5,6]
+    |> ZIO.find(fn x -> ZIO.return(x > 3) end)
+    |> assert_zio_success(4)
   end
 
   def assert_zio_success(zio, expected) do

@@ -1,7 +1,8 @@
 defmodule ZIO.Cause do
   defmodule Fail do
+    @derive Jason.Encoder
     defstruct [:error]
-    @type t :: %__MODULE__{error: term}
+    @type t(error) :: %__MODULE__{error: error}
   end
 
   defmodule Die do
@@ -17,5 +18,5 @@ defmodule ZIO.Cause do
   def die(throwable), do: %Die{throwable: throwable}
   def fail(error), do: %Fail{error: error}
 
-  @type t :: Fail.t() | Die.t() | Interrupt.t()
+  @type t(error) :: Fail.t(error) | Die.t() | Interrupt.t()
 end
