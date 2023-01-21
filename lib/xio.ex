@@ -201,6 +201,18 @@ defmodule ZIO do
     zip_with(zio1, zio2, fn x1, x2 -> ZIO.Zippable.zip(x1, x2) end)
   end
 
+  def each(list, f) do
+    list
+    |> Enum.reverse()
+    |> Enum.reduce(succeed_now(nil), fn x, acc ->
+      zip_right(f.(x), acc)
+    end)
+  end
+
+  def tap_error(zio, f) do
+    fold_zio(zio, fn e -> f.(e) |> zip_right(fail(e)) end, fn x -> succeed_now(x) end)
+  end
+
   def repeat(zio, n) do
     if n == 0 do
       succeed_now(nil)
@@ -273,10 +285,18 @@ defmodule ZIO do
     end
   end
 
-  def run_with(zio, env) do
+  def run_with(zio, %ZIO.Env{} = env) do
     zio
     |> provide(env)
     |> run_zio()
+  end
+
+  def run_with(zio, map) do
+    env =
+      map
+      |> Enum.into(%{})
+      |> ZIO.Env.new()
+    run_with(zio, env)
   end
 
   defp resume(%State{loop: false, result: result}) do

@@ -205,6 +205,18 @@ defmodule ZIOTest do
     |> assert_zio_success(4)
   end
 
+  test "each" do
+    [1,2,3]
+    |> ZIO.each(fn x -> ZIO.print_line(x) end)
+    |> assert_zio_success(nil)
+  end
+
+  test "tap_error" do
+    ZIO.fail("Failed!")
+    |> ZIO.tap_error(fn e -> ZIO.print_line("Error: #{e}") end)
+    |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
+  end
+
   def assert_zio_success(zio, expected) do
     zio
     |> ZIO.run(fn v -> 
