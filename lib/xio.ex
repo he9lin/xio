@@ -3,9 +3,6 @@ defmodule ZIO do
 
   alias ZIO.{Cause, Exit, Stack}
 
-  @type zio :: term
-  @type error :: term
-
   ## ADTs
 
   defmodule SucceedNow do
@@ -24,24 +21,26 @@ defmodule ZIO do
   end
 
   defmodule Fail do
-    @type e :: (() -> Cause.t())
+    @type inner(error) :: (() -> Cause.t(error))
 
     defstruct [:e]
-    @type t :: %__MODULE__{e: e}
+    @type t(error) :: %__MODULE__{e: inner(error)}
   end
 
   defmodule Fold do
     defstruct [:zio, :failure, :success]
 
     @type zio :: term
-    @type failure :: (Cause.t() -> zio)
-    @type success :: (term -> zio)
+    @type failure(error) :: (Cause.t(error) -> zio)
+    @type success(value) :: (term -> ZIO.io(value))
 
-    @type t :: %__MODULE__{zio: term, failure: failure, success: success}
+    @type t(error, value) :: %__MODULE__{zio: term, failure: failure(error), success: success(value)}
   end
 
   defmodule Provide do
     defstruct [:zio, :env]
+
+    @type t(env) :: %__MODULE__{zio: term, env: env}
   end
 
   defmodule Access do
@@ -53,7 +52,12 @@ defmodule ZIO do
     @type t :: %__MODULE__{f: f}
   end
 
-  @type t(value, error) :: SucceedNow.t(value) | Succeed.t | FlatMap.t | Fail.t(error) | Fold.t | Provide.t | Access.t
+  @type zio(env, error, value) :: SucceedNow.t(value) | Succeed.t | FlatMap.t | Fail.t(error) | Fold.t(error, value) | Provide.t(env) | Access.t
+  @type uio(env, value) :: zio(env, any, value)
+  @type io(value) :: uio(any, value)
+
+  @type zio :: term
+  @type error :: term
 
   ## Combinators
 
@@ -209,6 +213,14 @@ defmodule ZIO do
     end)
   end
 
+  def collect(list, f) do
+    list
+    |> Enum.reverse()
+    |> Enum.reduce(succeed_now([]), fn x, acc ->
+      zip_with(f.(x), acc, fn x, acc -> [x | acc] end)
+    end)
+  end
+
   def tap_error(zio, f) do
     fold_zio(zio, fn e -> f.(e) |> zip_right(fail(e)) end, fn x -> succeed_now(x) end)
   end
@@ -289,6 +301,14 @@ defmodule ZIO do
     zio
     |> provide(env)
     |> run_zio()
+  end
+
+  def run_with(zio, %{__struct__: _} = struct) do
+    env =
+      struct
+      |> Map.from_struct()
+      |> ZIO.Env.new()
+    run_with(zio, env)
   end
 
   def run_with(zio, map) do

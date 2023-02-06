@@ -211,6 +211,12 @@ defmodule ZIOTest do
     |> assert_zio_success(nil)
   end
 
+  test "collect" do
+    [1,2,3]
+    |> ZIO.collect(fn x -> ZIO.return(x + 1) end)
+    |> assert_zio_success([2,3,4])
+  end
+
   test "tap_error" do
     ZIO.fail("Failed!")
     |> ZIO.tap_error(fn e -> ZIO.print_line("Error: #{e}") end)
