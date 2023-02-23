@@ -233,6 +233,59 @@ defmodule ZIO do
     end
   end
 
+  def delay(zio, milliseconds) do
+    succeed(fn -> 
+      :timer.sleep(milliseconds)
+      :ok 
+    end) 
+    |> zip_right(zio)
+  end
+
+  defmodule RetryStrategy do
+    defstruct [:max_retries, :schedule, :retry_count]
+
+    @type schedule :: {:fixed, pos_integer} | {:exponential, pos_integer, pos_integer}
+
+    def new(max_retries, schedule) do
+      %__MODULE__{max_retries: max_retries, schedule: schedule, retry_count: 0}
+    end
+
+    def exceeded?(%__MODULE__{max_retries: max_retries, retry_count: retry_count}) do
+      retry_count >= max_retries
+    end
+
+    def increment(%__MODULE__{retry_count: retry_count} = strategy) do
+      %__MODULE__{strategy | retry_count: retry_count + 1}
+    end
+
+    def next_delay(%__MODULE__{schedule: schedule, retry_count: retry_count}) do
+      case schedule do
+        {:exponential, base, rand} ->
+          base_seconds = round(:math.pow(2, retry_count + base))
+          rand_seconds = :rand.uniform(rand)
+          base_seconds + rand_seconds
+        {:fixed, num} -> 
+          retry_count * num
+      end * 1000
+    end
+  end
+  
+  def retry(zio, %RetryStrategy{} = rs) do
+    fold_zio(
+      zio,
+      fn e ->
+        if RetryStrategy.exceeded?(rs) do
+          fail(e)
+        else
+          rs = RetryStrategy.increment(rs)
+          retry(zio, rs)
+          |> delay(RetryStrategy.next_delay(rs))
+        end
+      end,
+      fn x -> succeed_now(x) end
+    )
+  end
+
   def filter(list, f) do
     list
     |> Enum.reverse()
