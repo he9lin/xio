@@ -223,9 +223,26 @@ defmodule ZIOTest do
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 
+  defmodule RetryError do
+    defstruct [:error]
+    def new(error), do: %__MODULE__{error: error}
+  end
+
   test "retry" do
+    ZIO.fail(RetryError.new("Failed!"))
+    |> ZIO.retry(ZIO.RetryStrategy.new(3, {:exponential, 3, 100, :milliseconds}, RetryError))
+    |> assert_zio_failure(%ZIO.Cause.Fail{error: %ZIOTest.RetryError{error: "Failed!"}})
+  end
+
+  test "retry with matched error" do
     ZIO.fail("Failed!")
-    |> ZIO.retry(ZIO.RetryStrategy.new(3, {:exponential, 0, 1}))
+    |> ZIO.retry(ZIO.RetryStrategy.new(3, {:fixed, 50, :milliseconds}, [RetryError, "Failed!"]))
+    |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
+  end
+
+  test "retry with unmatched error" do
+    ZIO.fail("Failed!")
+    |> ZIO.retry(ZIO.RetryStrategy.new(3, {:exponential, 2, 100, :milliseconds}, RetryError))
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 

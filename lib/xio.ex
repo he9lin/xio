@@ -242,12 +242,30 @@ defmodule ZIO do
   end
 
   defmodule RetryStrategy do
-    defstruct [:max_retries, :schedule, :retry_count]
+    defstruct [:max_retries, :schedule, :retry_count, :on_errors]
 
-    @type schedule :: {:fixed, pos_integer} | {:exponential, pos_integer, pos_integer}
+    @type schedule_unit :: :milliseconds | :seconds | :minutes | :hours | :days
+    @type schedule :: {:fixed, pos_integer, schedule_unit} | {:exponential, pos_integer, pos_integer, schedule_unit}
 
     def new(max_retries, schedule) do
-      %__MODULE__{max_retries: max_retries, schedule: schedule, retry_count: 0}
+      new(max_retries, schedule, [])
+    end
+
+    def new(max_retries, schedule, on_errors) do
+      on_errors = List.wrap(on_errors)
+      %__MODULE__{max_retries: max_retries, schedule: schedule, retry_count: 0, on_errors: on_errors}
+    end
+
+    def match_on_errors?(%__MODULE__{on_errors: []}, _error) do
+      true
+    end
+
+    def match_on_errors?(%__MODULE__{on_errors: on_errors}, error) do
+      case error do
+        %{__struct__: struct} -> Enum.member?(on_errors, struct)
+        error_msg when is_binary(error_msg) -> Enum.member?(on_errors, error_msg)
+        _ -> false
+      end
     end
 
     def exceeded?(%__MODULE__{max_retries: max_retries, retry_count: retry_count}) do
@@ -260,13 +278,23 @@ defmodule ZIO do
 
     def next_delay(%__MODULE__{schedule: schedule, retry_count: retry_count}) do
       case schedule do
-        {:exponential, base, rand} ->
+        {:exponential, base, rand, unit} ->
           base_seconds = round(:math.pow(2, retry_count + base))
           rand_seconds = :rand.uniform(rand)
-          base_seconds + rand_seconds
-        {:fixed, num} -> 
-          retry_count * num
-      end * 1000
+          (base_seconds + rand_seconds) * to_milliseconds(unit)
+        {:fixed, num, unit} -> 
+          retry_count * num * to_milliseconds(unit)
+      end
+    end
+
+    defp to_milliseconds(unit) do
+      case unit do
+        :milliseconds -> 1
+        :seconds -> 1000
+        :minutes -> 60 * 1000
+        :hours -> 60 * 60 * 1000
+        :days -> 24 * 60 * 60 * 1000
+      end
     end
   end
   
@@ -274,12 +302,14 @@ defmodule ZIO do
     fold_zio(
       zio,
       fn e ->
-        if RetryStrategy.exceeded?(rs) do
+        if RetryStrategy.exceeded?(rs) || !RetryStrategy.match_on_errors?(rs, e) do
           fail(e)
         else
           rs = RetryStrategy.increment(rs)
-          retry(zio, rs)
-          |> delay(RetryStrategy.next_delay(rs))
+          delay_duration = RetryStrategy.next_delay(rs)
+          zio
+          |> retry(rs)
+          |> delay(delay_duration)
         end
       end,
       fn x -> succeed_now(x) end
