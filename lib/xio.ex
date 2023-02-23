@@ -251,21 +251,28 @@ defmodule ZIO do
       new(max_retries, schedule, [])
     end
 
-    def new(max_retries, schedule, on_errors) do
-      on_errors = List.wrap(on_errors)
+    def new(max_retries, schedule, on_errors) when is_function(on_errors, 1) do
       %__MODULE__{max_retries: max_retries, schedule: schedule, retry_count: 0, on_errors: on_errors}
+    end
+
+    def new(max_retries, schedule, on_errors)  do
+      %__MODULE__{max_retries: max_retries, schedule: schedule, retry_count: 0, on_errors: List.wrap(on_errors)}
     end
 
     def match_on_errors?(%__MODULE__{on_errors: []}, _error) do
       true
     end
 
-    def match_on_errors?(%__MODULE__{on_errors: on_errors}, error) do
+    def match_on_errors?(%__MODULE__{on_errors: on_errors}, error) when is_list(on_errors) do
       case error do
         %{__struct__: struct} -> Enum.member?(on_errors, struct)
         error_msg when is_binary(error_msg) -> Enum.member?(on_errors, error_msg)
         _ -> false
       end
+    end
+
+    def match_on_errors?(%__MODULE__{on_errors: on_errors}, error) when is_function(on_errors, 1) do
+      on_errors.(error)
     end
 
     def exceeded?(%__MODULE__{max_retries: max_retries, retry_count: retry_count}) do

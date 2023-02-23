@@ -246,6 +246,12 @@ defmodule ZIOTest do
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 
+  test "retry with a function matching on error" do
+    ZIO.fail("Failed!")
+    |> ZIO.retry(ZIO.RetryStrategy.new(3, {:exponential, 2, 100, :milliseconds}, fn e -> e == "Failed!" end))
+    |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
+  end
+
   def assert_zio_success(zio, expected) do
     zio
     |> ZIO.run(fn v -> 
