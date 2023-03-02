@@ -455,7 +455,7 @@ defmodule ZIO do
             end
         end
       rescue
-        e in ExUnit.AssertionError ->
+        e in [ExUnit.AssertionError, Mox.UnexpectedCallError] ->
           raise e
         e ->
           if Enum.empty?(stack) do
