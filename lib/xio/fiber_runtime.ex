@@ -46,23 +46,32 @@ defmodule ZIO.FiberRuntime do
   def await(pid) do
     ZIO.async(fn register ->
       add_observer(pid, fn exit ->
-        register.(ZIO.succeed(exit)) # done?
+        register.(ZIO.done(exit))
       end)
     end)
   end
 
+  def join(pid) do
+    await(pid) |> ZIO.flat_map(&ZIO.done/1)
+  end
+
   def handle_cast({:add_observer, observer}, state) do
-    new_observers = state.observers ++ [observer]
-    %{state | observers: new_observers}
-    {:noreply, state}
+    if is_nil(state.result) do
+      new_observers = state.observers ++ [observer]
+      %{state | observers: new_observers}
+      {:noreply, state}
+    else
+      observer.(state.result)
+      {:noreply, state}
+    end
   end
 
   def handle_cast({:resume, zio}, state) do
     if is_nil(state.result) do
       state = %{state | current_zio: zio}
+      run_loop(self(), state)
       {:noreply, state}
     else
-      run_loop(self())
       {:noreply, state}
     end
   end
@@ -81,12 +90,13 @@ defmodule ZIO.FiberRuntime do
     {:reply, state, state}
   end
 
-  def run_loop(_pid, %__MODULE__{loop: false, result: result}) do
-    # TODO: stop pid?
+  def run_loop(pid, %__MODULE__{loop: false, result: result}) do
+    # Process.exit(pid, :normal)
     result
   end
 
   def run_loop(pid, %__MODULE__{stack: stack, current_zio: current_zio} = state) do
+    # dbg(current_zio)
     try do
       case current_zio do
         %ZIO.Succeed{thunk: thunk} ->
@@ -101,14 +111,13 @@ defmodule ZIO.FiberRuntime do
 
         %ZIO.Async{register: register} ->
           update_state(pid, %{state | current_zio: nil, loop: false})
-
           register.(fn zio ->
             resume(pid, zio)
           end)
 
         %ZIO.Fold{zio: zio, failure: _failure, success: _success} = fold ->
           stack = Stack.push(stack, fold)
-          %{state | stack: stack, current_zio: zio}
+          update_state(pid, %{state | stack: stack, current_zio: zio})
 
         %ZIO.Fail{e: e} ->
           with_error_handler(pid, state, e)

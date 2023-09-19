@@ -284,7 +284,12 @@ defmodule ZIO do
   end
 
   def fork(zio) do
-    %Fork{zio: zio}
+    ZIO.succeed(fn ->
+      {:ok, pid} = ZIO.FiberRuntime.start_link(zio)
+      dbg("fork - #{inspect pid}")
+      ZIO.FiberRuntime.start(pid)
+      pid
+    end)
   end
 
   def retry(zio, %RetryStrategy{} = rs) do
@@ -357,25 +362,13 @@ defmodule ZIO do
 
   def unsafe_run(zio) do
     {:ok, pid} = ZIO.FiberRuntime.start_link(zio)
+    dbg(pid)
     ZIO.FiberRuntime.start(pid)
   end
 
   # A FiberRuntime takes zio and run
-  def run(zio, callback) do
-    state = %State{
-      stack: [],
-      env_stack: [],
-      current_zio: zio,
-      loop: true,
-      callback: callback,
-      result: nil
-    }
-
-    resume(state)
-  end
-
   def run_zio(zio) do
-    case run(zio, fn x -> x end) do
+    case unsafe_run(zio) do
       %ZIO.Exit.Success{value: value} -> {:ok, value}
       %ZIO.Exit.Failure{cause: cause} -> {:error, cause}
     end
@@ -403,130 +396,5 @@ defmodule ZIO do
       |> ZIO.Env.new()
 
     run_with(zio, env)
-  end
-
-  defp resume(%State{loop: false, result: result}) do
-    result
-  end
-
-  defp resume(%State{current_zio: current_zio, stack: stack, env_stack: env_stack, callback: callback} = state) do
-    state =
-      try do
-        case current_zio do
-          %SucceedNow{value: value} ->
-            continue(state, value)
-
-          %Succeed{thunk: thunk} ->
-            continue(state, thunk.())
-
-          %FlatMap{zio: zio, cont: cont} ->
-            stack = Stack.push(stack, cont)
-            %State{state | stack: stack, current_zio: zio}
-
-          # ZIO[Fiber]
-          %Fork{zio: zio} ->
-            # fiber = Fiber.start(zio)
-            fiber = nil
-            continue(state, fiber)
-
-          %Async{register: register} ->
-            if Enum.empty?(stack) do
-              register.(fn a ->
-                complete(callback, Exit.succeed(a))
-              end)
-
-              %{state | loop: false}
-            else
-              register.(fn a ->
-                current_zio = succeed_now(a)
-
-                %State{state | current_zio: current_zio, loop: true}
-                |> resume()
-              end)
-
-              %{state | loop: false}
-            end
-
-          %Fold{zio: zio, failure: _failure, success: _success} = fold ->
-            stack = Stack.push(stack, fold)
-            %{state | stack: stack, current_zio: zio}
-
-          %Fail{e: e} ->
-            with_error_handler(state, e)
-
-          %Provide{zio: zio, env: env} ->
-            env_stack = Stack.push(env_stack, env)
-
-            ensuring_zio =
-              succeed(fn ->
-                {env, _env_stack} = Stack.pop(env_stack)
-                env
-              end)
-
-            current_zio = zio |> ensuring(ensuring_zio)
-            %{state | env_stack: env_stack, current_zio: current_zio}
-
-          %Access{f: f} ->
-            case env_stack do
-              [head | _] ->
-                current_zio = f.(head)
-                %{state | current_zio: current_zio}
-
-              _ ->
-                raise "No environment provided"
-            end
-        end
-      rescue
-        e in [ExUnit.AssertionError, Mox.UnexpectedCallError] ->
-          raise e
-
-        e ->
-          if Enum.empty?(stack) do
-            raise e
-          else
-            # TODO: Add stack information
-            %{state | current_zio: die(e)}
-          end
-      end
-
-    resume(state)
-  end
-
-  defp continue(%State{stack: stack, callback: callback} = state, value) do
-    if Enum.empty?(stack) do
-      result = Exit.succeed(value)
-      complete(callback, result)
-      %{state | loop: false, result: result}
-    else
-      # cont can be a Fold or (any -> zio)
-      [cont | rest] = stack
-
-      case cont do
-        %Fold{} ->
-          %{state | stack: rest, current_zio: cont.success.(value)}
-
-        _ ->
-          %{state | stack: rest, current_zio: cont.(value)}
-      end
-    end
-  end
-
-  defp complete(callback, exit) do
-    callback.(ZIO.done(exit))
-  end
-
-  defp with_error_handler(%State{stack: stack, callback: callback} = state, e) do
-    case Stack.pop(stack) do
-      {nil, []} ->
-        result = %Exit.Failure{cause: e.()}
-        complete(callback, result)
-        %{state | loop: false, result: result}
-
-      {%Fold{} = error_handler, stack} ->
-        %{state | stack: stack, current_zio: error_handler.failure.(e.())}
-
-      {_, stack} ->
-        with_error_handler(%{state | stack: stack}, e)
-    end
   end
 end
