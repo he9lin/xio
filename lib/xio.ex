@@ -1,62 +1,100 @@
 defmodule ZIO do
   use Monad
 
-  alias ZIO.{Cause, Exit, Stack}
+  alias ZIO.{Cause, Exit, Stack, RetryStrategy}
 
   ## ADTs
 
   defmodule SucceedNow do
+    @enforce_keys [:value]
     defstruct [:value]
+
     @type t(value) :: %__MODULE__{value: value}
   end
 
-  defmodule Suceeed do
+  defmodule Succeed do
+    @enforce_keys [:thunk]
     defstruct [:thunk]
-    @type t :: %__MODULE__{thunk: term}
+
+    @type t :: %__MODULE__{thunk: fun()}
   end
 
   defmodule FlatMap do
+    @enforce_keys [:zio, :cont]
     defstruct [:zio, :cont]
-    @type t :: %__MODULE__{cont: term}
+
+    @type cont :: (term -> ZIO.zio())
+
+    @type t :: %__MODULE__{zio: ZIO.zio(), cont: cont}
   end
 
   defmodule Fail do
-    @type inner(error) :: (() -> Cause.t(error))
+    @type inner(error) :: (-> Cause.t(error))
 
+    @enforce_keys [:e]
     defstruct [:e]
     @type t(error) :: %__MODULE__{e: inner(error)}
   end
 
   defmodule Fold do
+    @enforce_keys [:zio, :failure, :success]
     defstruct [:zio, :failure, :success]
 
-    @type zio :: term
-    @type failure(error) :: (Cause.t(error) -> zio)
+    @type failure(error) :: (Cause.t(error) -> ZIO.zio())
     @type success(value) :: (term -> ZIO.io(value))
 
-    @type t(error, value) :: %__MODULE__{zio: term, failure: failure(error), success: success(value)}
+    @type t(error, value) :: %__MODULE__{
+            zio: ZIO.zio(),
+            failure: failure(error),
+            success: success(value)
+          }
   end
 
   defmodule Provide do
+    @enforce_keys [:zio, :env]
     defstruct [:zio, :env]
 
-    @type t(env) :: %__MODULE__{zio: term, env: env}
+    @type t(env) :: %__MODULE__{zio: ZIO.zio(), env: env}
   end
 
   defmodule Access do
     @type env :: term
-    @type zio :: term
-    @type f :: (env -> zio)
+    @type f :: (env -> ZIO.zio())
 
+    @enforce_keys [:f]
     defstruct [:f]
     @type t :: %__MODULE__{f: f}
   end
 
-  @type zio(env, error, value) :: SucceedNow.t(value) | Succeed.t | FlatMap.t | Fail.t(error) | Fold.t(error, value) | Provide.t(env) | Access.t
+  defmodule Async do
+    @enforce_keys [:register]
+    defstruct [:register]
+
+    @type register :: ((ZIO.zio() -> any) -> any)
+    @type t :: %__MODULE__{register: register}
+  end
+
+  defmodule Fork do
+    @enforce_keys [:zio]
+    defstruct [:zio]
+
+    @type t :: %__MODULE__{zio: ZIO.zio()}
+  end
+
+  @type zio(env, error, value) ::
+          SucceedNow.t(value)
+          | Succeed.t()
+          | FlatMap.t()
+          | Fail.t(error)
+          | Fold.t(error, value)
+          | Provide.t(env)
+          | Access.t()
+          | Async.t()
+          | Fork.t()
   @type uio(env, value) :: zio(env, any, value)
   @type io(value) :: uio(any, value)
+  @type zio :: io(any)
 
-  @type zio :: term
   @type error :: term
 
   ## Combinators
@@ -69,8 +107,8 @@ defmodule ZIO do
     succeed_now(value)
   end
 
-  def succeed(callback) do
-    %Suceeed{thunk: callback}
+  def succeed(callback) when is_function(callback) do
+    %Succeed{thunk: callback}
   end
 
   def flat_map(zio, cont) do
@@ -86,9 +124,9 @@ defmodule ZIO do
   end
 
   def environment(dep_key) do
-    access_zio(fn env -> 
+    access_zio(fn env ->
       specific_env = ZIO.Env.get(env, dep_key)
-      succeed_now(specific_env) 
+      succeed_now(specific_env)
     end)
   end
 
@@ -234,77 +272,21 @@ defmodule ZIO do
   end
 
   def delay(zio, milliseconds) do
-    succeed(fn -> 
+    succeed(fn ->
       :timer.sleep(milliseconds)
-      :ok 
-    end) 
+      :ok
+    end)
     |> zip_right(zio)
   end
 
-  defmodule RetryStrategy do
-    defstruct [:max_retries, :schedule, :retry_count, :on_errors]
-
-    @type schedule_unit :: :milliseconds | :seconds | :minutes | :hours | :days
-    @type schedule :: {:fixed, pos_integer, schedule_unit} | {:exponential, pos_integer, pos_integer, schedule_unit}
-
-    def new(max_retries, schedule) do
-      new(max_retries, schedule, [])
-    end
-
-    def new(max_retries, schedule, on_errors) when is_function(on_errors, 1) do
-      %__MODULE__{max_retries: max_retries, schedule: schedule, retry_count: 0, on_errors: on_errors}
-    end
-
-    def new(max_retries, schedule, on_errors)  do
-      %__MODULE__{max_retries: max_retries, schedule: schedule, retry_count: 0, on_errors: List.wrap(on_errors)}
-    end
-
-    def match_on_errors?(%__MODULE__{on_errors: []}, _error) do
-      true
-    end
-
-    def match_on_errors?(%__MODULE__{on_errors: on_errors}, error) when is_list(on_errors) do
-      case error do
-        %{__struct__: struct} -> Enum.member?(on_errors, struct)
-        error_msg when is_binary(error_msg) -> Enum.member?(on_errors, error_msg)
-        _ -> false
-      end
-    end
-
-    def match_on_errors?(%__MODULE__{on_errors: on_errors}, error) when is_function(on_errors, 1) do
-      on_errors.(error)
-    end
-
-    def exceeded?(%__MODULE__{max_retries: max_retries, retry_count: retry_count}) do
-      retry_count >= max_retries
-    end
-
-    def increment(%__MODULE__{retry_count: retry_count} = strategy) do
-      %__MODULE__{strategy | retry_count: retry_count + 1}
-    end
-
-    def next_delay(%__MODULE__{schedule: schedule, retry_count: retry_count}) do
-      case schedule do
-        {:exponential, base, rand, unit} ->
-          base_seconds = round(:math.pow(2, retry_count + base))
-          rand_seconds = :rand.uniform(rand)
-          (base_seconds + rand_seconds) * to_milliseconds(unit)
-        {:fixed, num, unit} -> 
-          retry_count * num * to_milliseconds(unit)
-      end
-    end
-
-    defp to_milliseconds(unit) do
-      case unit do
-        :milliseconds -> 1
-        :seconds -> 1000
-        :minutes -> 60 * 1000
-        :hours -> 60 * 60 * 1000
-        :days -> 24 * 60 * 60 * 1000
-      end
-    end
+  def async(register) do
+    %Async{register: register}
   end
-  
+
+  def fork(zio) do
+    %Fork{zio: zio}
+  end
+
   def retry(zio, %RetryStrategy{} = rs) do
     fold_zio(
       zio,
@@ -314,6 +296,7 @@ defmodule ZIO do
         else
           rs = RetryStrategy.increment(rs)
           delay_duration = RetryStrategy.next_delay(rs)
+
           zio
           |> retry(rs)
           |> delay(delay_duration)
@@ -344,9 +327,12 @@ defmodule ZIO do
 
   def loop(list, index, f) do
     length = Enum.count(list)
+
     if index < length do
       item = Enum.at(list, index)
-      f.(item) |> ZIO.flat_map(fn x ->
+
+      f.(item)
+      |> ZIO.flat_map(fn x ->
         if x do
           succeed_now(item)
         else
@@ -367,11 +353,19 @@ defmodule ZIO do
     defstruct [:stack, :env_stack, :current_zio, :loop, :callback, :result]
   end
 
-  def run(xio, callback) do
+  # unsafeRunAsync
+
+  def unsafe_run(zio) do
+    {:ok, pid} = ZIO.FiberRuntime.start_link(zio)
+    ZIO.FiberRuntime.start(pid)
+  end
+
+  # A FiberRuntime takes zio and run
+  def run(zio, callback) do
     state = %State{
       stack: [],
       env_stack: [],
-      current_zio: xio,
+      current_zio: zio,
       loop: true,
       callback: callback,
       result: nil
@@ -380,8 +374,8 @@ defmodule ZIO do
     resume(state)
   end
 
-  def run_zio(xio) do
-    case run(xio, fn x -> x end) do
+  def run_zio(zio) do
+    case run(zio, fn x -> x end) do
       %ZIO.Exit.Success{value: value} -> {:ok, value}
       %ZIO.Exit.Failure{cause: cause} -> {:error, cause}
     end
@@ -398,6 +392,7 @@ defmodule ZIO do
       struct
       |> Map.from_struct()
       |> ZIO.Env.new()
+
     run_with(zio, env)
   end
 
@@ -406,6 +401,7 @@ defmodule ZIO do
       map
       |> Enum.into(%{})
       |> ZIO.Env.new()
+
     run_with(zio, env)
   end
 
@@ -413,19 +409,43 @@ defmodule ZIO do
     result
   end
 
-  defp resume(%State{current_zio: current_zio, stack: stack, env_stack: env_stack} = state) do
+  defp resume(%State{current_zio: current_zio, stack: stack, env_stack: env_stack, callback: callback} = state) do
     state =
       try do
         case current_zio do
           %SucceedNow{value: value} ->
             continue(state, value)
 
-          %Suceeed{thunk: thunk} ->
+          %Succeed{thunk: thunk} ->
             continue(state, thunk.())
 
           %FlatMap{zio: zio, cont: cont} ->
             stack = Stack.push(stack, cont)
             %State{state | stack: stack, current_zio: zio}
+
+          # ZIO[Fiber]
+          %Fork{zio: zio} ->
+            # fiber = Fiber.start(zio)
+            fiber = nil
+            continue(state, fiber)
+
+          %Async{register: register} ->
+            if Enum.empty?(stack) do
+              register.(fn a ->
+                complete(callback, Exit.succeed(a))
+              end)
+
+              %{state | loop: false}
+            else
+              register.(fn a ->
+                current_zio = succeed_now(a)
+
+                %State{state | current_zio: current_zio, loop: true}
+                |> resume()
+              end)
+
+              %{state | loop: false}
+            end
 
           %Fold{zio: zio, failure: _failure, success: _success} = fold ->
             stack = Stack.push(stack, fold)
@@ -436,13 +456,14 @@ defmodule ZIO do
 
           %Provide{zio: zio, env: env} ->
             env_stack = Stack.push(env_stack, env)
-             
-            ensuring_zio = succeed(fn -> 
-              { env, _env_stack } = Stack.pop(env_stack) 
-              env
-            end)
 
-            current_zio =  zio |> ensuring(ensuring_zio)
+            ensuring_zio =
+              succeed(fn ->
+                {env, _env_stack} = Stack.pop(env_stack)
+                env
+              end)
+
+            current_zio = zio |> ensuring(ensuring_zio)
             %{state | env_stack: env_stack, current_zio: current_zio}
 
           %Access{f: f} ->
@@ -450,6 +471,7 @@ defmodule ZIO do
               [head | _] ->
                 current_zio = f.(head)
                 %{state | current_zio: current_zio}
+
               _ ->
                 raise "No environment provided"
             end
@@ -457,10 +479,12 @@ defmodule ZIO do
       rescue
         e in [ExUnit.AssertionError, Mox.UnexpectedCallError] ->
           raise e
+
         e ->
           if Enum.empty?(stack) do
             raise e
           else
+            # TODO: Add stack information
             %{state | current_zio: die(e)}
           end
       end
@@ -476,6 +500,7 @@ defmodule ZIO do
     else
       # cont can be a Fold or (any -> zio)
       [cont | rest] = stack
+
       case cont do
         %Fold{} ->
           %{state | stack: rest, current_zio: cont.success.(value)}

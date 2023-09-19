@@ -25,6 +25,7 @@ defmodule ZIOTest do
       ZIO.return(1)
       |> ZIO.map(&(&1 + 1))
       |> ZIO.run(fn x -> x end)
+
     assert result == %ZIO.Exit.Success{value: 2}
   end
 
@@ -76,8 +77,8 @@ defmodule ZIOTest do
   test "monad do block" do
     require ZIO
 
-    zipped_zio = 
-      ZIO.return(8) 
+    zipped_zio =
+      ZIO.return(8)
       |> ZIO.zip(ZIO.return("HE"))
       |> ZIO.zip(ZIO.return("LLO"))
 
@@ -134,18 +135,46 @@ defmodule ZIOTest do
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 
+  test "async" do
+    require ZIO
+
+    zio =
+      ZIO.m do
+        x <-
+          ZIO.async(fn callback ->
+            IO.puts("Long running task")
+            :timer.sleep(3000)
+            callback.(10)
+          end)
+
+        y <-
+          ZIO.async(fn callback ->
+            IO.puts("Long running task")
+            :timer.sleep(3000)
+            callback.(20)
+          end)
+
+        return({x, y})
+      end
+
+    zio
+    |> assert_zio_success({10, 20})
+  end
+
   test "provide" do
     zio = ZIO.access_zio(fn n -> ZIO.return(n + 1) end)
-    zio 
-    |> ZIO.provide(1) 
+
+    zio
+    |> ZIO.provide(1)
     |> assert_zio_success(2)
   end
 
   test "provide with fail" do
     zio = ZIO.access_zio(fn n -> ZIO.return(n + 1) end)
-    zio 
+
+    zio
     |> ZIO.flat_map(fn _ -> ZIO.fail("Failed!") end)
-    |> ZIO.provide(1) 
+    |> ZIO.provide(1)
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 
@@ -156,7 +185,7 @@ defmodule ZIOTest do
       ZIO.m do
         env <- ZIO.environment()
         _ <- ZIO.print_line("Hello #{env}")
-        return env
+        return(env)
       end
 
     zio
@@ -171,7 +200,7 @@ defmodule ZIOTest do
       ZIO.m do
         env <- ZIO.environment(:http_client)
         _ <- ZIO.print_line("Hello #{env}")
-        return env
+        return(env)
       end
 
     zio
@@ -186,35 +215,37 @@ defmodule ZIOTest do
       ZIO.m do
         env <- ZIO.environment()
         _ <- ZIO.print_line("Hello #{env}")
-        return env
+        return(env)
       end
 
     zio
-    |> assert_zio_failure(%ZIO.Cause.Die{throwable: %RuntimeError{message: "No environment provided"}})
+    |> assert_zio_failure(%ZIO.Cause.Die{
+      throwable: %RuntimeError{message: "No environment provided"}
+    })
   end
 
   test "filter" do
-    [1,2,3]
+    [1, 2, 3]
     |> ZIO.filter(fn x -> ZIO.return(x > 1) end)
-    |> assert_zio_success([2,3])
+    |> assert_zio_success([2, 3])
   end
 
   test "find" do
-    [1,2,3,4,5,6]
+    [1, 2, 3, 4, 5, 6]
     |> ZIO.find(fn x -> ZIO.return(x > 3) end)
     |> assert_zio_success(4)
   end
 
   test "each" do
-    [1,2,3]
+    [1, 2, 3]
     |> ZIO.each(fn x -> ZIO.print_line(x) end)
     |> assert_zio_success(nil)
   end
 
   test "collect" do
-    [1,2,3]
+    [1, 2, 3]
     |> ZIO.collect(fn x -> ZIO.return(x + 1) end)
-    |> assert_zio_success([2,3,4])
+    |> assert_zio_success([2, 3, 4])
   end
 
   test "tap_error" do
@@ -248,20 +279,22 @@ defmodule ZIOTest do
 
   test "retry with a function matching on error" do
     ZIO.fail("Failed!")
-    |> ZIO.retry(ZIO.RetryStrategy.new(3, {:exponential, 2, 100, :milliseconds}, fn e -> e == "Failed!" end))
+    |> ZIO.retry(
+      ZIO.RetryStrategy.new(3, {:exponential, 2, 100, :milliseconds}, fn e -> e == "Failed!" end)
+    )
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 
   def assert_zio_success(zio, expected) do
     zio
-    |> ZIO.run(fn v -> 
+    |> ZIO.run(fn v ->
       assert v == ZIO.return(expected)
     end)
   end
 
   def assert_zio_failure(zio, expected) do
     zio
-    |> ZIO.run(fn v -> 
+    |> ZIO.run(fn v ->
       cause = v.e.()
       assert cause == expected
     end)
@@ -269,7 +302,7 @@ defmodule ZIOTest do
 
   def assert_zio(zio, expected_zio) do
     zio
-    |> ZIO.run(fn v -> 
+    |> ZIO.run(fn v ->
       assert v == expected_zio
     end)
   end
