@@ -131,6 +131,26 @@ defmodule ZIO.FiberRuntime do
 
         %ZIO.Fail{e: e} ->
           with_error_handler(pid, state, e)
+
+        %ZIO.Provide{zio: zio, env: env} ->
+          env_stack = Stack.push(state.env_stack, env)
+
+          ensuring_zio = ZIO.succeed(fn ->
+            { env, _env_stack } = Stack.pop(env_stack)
+            env
+          end)
+
+          current_zio = zio |> ZIO.ensuring(ensuring_zio)
+          update_state(pid, %{state | env_stack: env_stack, current_zio: current_zio})
+
+        %ZIO.Access{f: f} ->
+          case state.env_stack do
+            [head | _] ->
+              current_zio = f.(head)
+              update_state(pid, %{state | current_zio: current_zio})
+            _ ->
+              raise "No environment provided"
+          end
       end
     rescue
       e in [ExUnit.AssertionError] ->

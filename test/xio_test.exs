@@ -2,6 +2,8 @@ defmodule ZIOTest do
   use ExUnit.Case, async: true
   alias ZIO.Env
 
+  require ZIO
+
   test "run flat_map" do
     ZIO.return(1)
     |> ZIO.flat_map(fn x -> ZIO.return(x + 1) end)
@@ -24,7 +26,7 @@ defmodule ZIOTest do
     result =
       ZIO.return(1)
       |> ZIO.map(&(&1 + 1))
-      |> ZIO.run(fn x -> x end)
+      |> ZIO.unsafe_run_sync()
 
     assert result == %ZIO.Exit.Success{value: 2}
   end
@@ -135,30 +137,14 @@ defmodule ZIOTest do
     |> assert_zio_failure(%ZIO.Cause.Fail{error: "Failed!"})
   end
 
-  test "async" do
-    require ZIO
-
+  test "fork" do
     zio =
-      ZIO.m do
-        x <-
-          ZIO.async(fn callback ->
-            IO.puts("Long running task")
-            :timer.sleep(3000)
-            callback.(10)
-          end)
-
-        y <-
-          ZIO.async(fn callback ->
-            IO.puts("Long running task")
-            :timer.sleep(3000)
-            callback.(20)
-          end)
-
-        return({x, y})
-      end
-
+      speak_with_delay("Hello", 3000)
+      |> zip_with_par(speak_with_delay("World", 5000), fn a, b ->
+        {a, b}
+      end)
     zio
-    |> assert_zio_success({10, 20})
+    |> assert_zio_success({3000, 5000})
   end
 
   test "provide" do
@@ -286,24 +272,36 @@ defmodule ZIOTest do
   end
 
   def assert_zio_success(zio, expected) do
-    zio
-    |> ZIO.run(fn v ->
-      assert v == ZIO.return(expected)
-    end)
+    result = ZIO.unsafe_run_sync(zio)
+    assert result == %ZIO.Exit.Success{value: expected}
   end
 
   def assert_zio_failure(zio, expected) do
-    zio
-    |> ZIO.run(fn v ->
-      cause = v.e.()
-      assert cause == expected
+    result = ZIO.unsafe_run_sync(zio)
+    assert result.cause == expected
+  end
+
+  def assert_zio(zio, expected) do
+    result = ZIO.unsafe_run_sync(zio)
+    assert result == expected
+  end
+
+  defp speak_with_delay(message, delay) do
+    ZIO.succeed(fn ->
+      :timer.sleep(delay)
+      IO.puts(message)
+      delay
     end)
   end
 
-  def assert_zio(zio, expected_zio) do
-    zio
-    |> ZIO.run(fn v ->
-      assert v == expected_zio
-    end)
+  defp zip_with_par(zio1, zio2, f) do
+    ZIO.m do
+      left <- ZIO.fork(zio1)
+      right <- ZIO.fork(zio2)
+      a <- ZIO.FiberRuntime.join(left)
+      b <- ZIO.FiberRuntime.join(right)
+
+      return f.(a, b)
+    end
   end
 end
