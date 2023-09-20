@@ -286,7 +286,6 @@ defmodule ZIO do
   def fork(zio) do
     ZIO.succeed(fn ->
       {:ok, pid} = ZIO.FiberRuntime.start_link()
-      #dbg("fork - #{inspect(pid)}")
       ZIO.FiberRuntime.start(pid, zio)
     end)
   end
@@ -361,13 +360,11 @@ defmodule ZIO do
 
   def unsafe_run_async(zio) do
     {:ok, pid} = ZIO.FiberRuntime.start_link()
-    #dbg(pid)
     ZIO.FiberRuntime.start(pid, zio)
   end
 
   def unsafe_run_sync(zio) do
     {:ok, pid} = ZIO.FiberRuntime.start_link()
-    #dbg(pid)
 
     result_pid = self()
 
