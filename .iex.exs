@@ -7,6 +7,7 @@ defmodule ZIOExt do
     ZIO.succeed(fn ->
       :timer.sleep(delay)
       IO.puts(message)
+      delay
     end)
   end
 
@@ -23,6 +24,8 @@ defmodule ZIOExt do
 
   def run() do
     speak_with_delay("Hello", 3000)
-    |> zip_with_par(speak_with_delay("World", 5000), fn _, _ -> nil end)
+    |> zip_with_par(speak_with_delay("World", 5000), fn a, b ->
+      a + b
+    end)
   end
 end

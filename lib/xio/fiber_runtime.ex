@@ -6,15 +6,15 @@ defmodule ZIO.FiberRuntime do
   @enforce_keys [:stack, :env_stack, :current_zio, :loop, :observers, :result]
   defstruct [:stack, :env_stack, :current_zio, :loop, :observers, :result]
 
-  def start_link(zio) do
-    GenServer.start_link(__MODULE__, zio)
+  def start_link() do
+    GenServer.start_link(__MODULE__, nil)
   end
 
-  def init(zio) do
+  def init(_) do
     state = %__MODULE__{
       stack: [],
       env_stack: [],
-      current_zio: zio,
+      current_zio: nil,
       loop: true,
       observers: [],
       result: nil
@@ -23,8 +23,14 @@ defmodule ZIO.FiberRuntime do
     {:ok, state}
   end
 
-  def start(pid) do
-    run_loop(pid)
+  def start(pid, zio) do
+    GenServer.cast(pid, {:update_current_zio, zio})
+
+    task = Task.async(fn ->
+      run_loop(pid)
+    end)
+
+    {pid, task}
   end
 
   def add_observer(pid, observer) do
@@ -33,6 +39,7 @@ defmodule ZIO.FiberRuntime do
 
   def resume(pid, zio) do
     GenServer.cast(pid, {:resume, zio})
+    run_loop(pid)
   end
 
   def get_state(pid) do
@@ -45,21 +52,29 @@ defmodule ZIO.FiberRuntime do
 
   def await(pid) do
     ZIO.async(fn register ->
+      #dbg("Try add observer")
       add_observer(pid, fn exit ->
-        register.(ZIO.done(exit))
+        #dbg("exit: #{inspect exit}")
+        register.(ZIO.succeed(fn -> exit end))
       end)
     end)
   end
 
-  def join(pid) do
+  def join({pid, task}) do
+    #dbg("join task #{inspect task} with pid #{inspect pid}")
     await(pid) |> ZIO.flat_map(&ZIO.done/1)
+  end
+
+  def handle_cast({:update_current_zio, zio}, state) do
+    {:noreply, %{state | current_zio: zio}}
   end
 
   def handle_cast({:add_observer, observer}, state) do
     if is_nil(state.result) do
       new_observers = state.observers ++ [observer]
-      %{state | observers: new_observers}
-      {:noreply, state}
+      new_state = %{state | observers: new_observers}
+      #dbg("ADD OBSERVER (#{inspect self()})=> state: #{inspect new_state}")
+      {:noreply, new_state}
     else
       observer.(state.result)
       {:noreply, state}
@@ -68,8 +83,7 @@ defmodule ZIO.FiberRuntime do
 
   def handle_cast({:resume, zio}, state) do
     if is_nil(state.result) do
-      state = %{state | current_zio: zio}
-      run_loop(self(), state)
+      state = %{state | current_zio: zio, loop: true}
       {:noreply, state}
     else
       {:noreply, state}
@@ -90,13 +104,14 @@ defmodule ZIO.FiberRuntime do
     {:reply, state, state}
   end
 
-  def run_loop(pid, %__MODULE__{loop: false, result: result}) do
+  def run_loop(pid, %__MODULE__{loop: false, result: result, current_zio: current_zio}) do
+    #dbg("STOPPED LOOP on (#{inspect pid}) with result: #{inspect result} AND current_zio: #{inspect current_zio}")
     # Process.exit(pid, :normal)
-    result
+    nil
   end
 
   def run_loop(pid, %__MODULE__{stack: stack, current_zio: current_zio} = state) do
-    # dbg(current_zio)
+    #dbg("current_zio (#{inspect pid}): #{inspect current_zio}")
     try do
       case current_zio do
         %ZIO.Succeed{thunk: thunk} ->
@@ -110,10 +125,11 @@ defmodule ZIO.FiberRuntime do
           update_state(pid, %{state | stack: stack, current_zio: zio})
 
         %ZIO.Async{register: register} ->
-          update_state(pid, %{state | current_zio: nil, loop: false})
           register.(fn zio ->
+            #dbg("RESUMING with zio: #{inspect zio}")
             resume(pid, zio)
           end)
+          update_state(pid, %{state | current_zio: nil, loop: false})
 
         %ZIO.Fold{zio: zio, failure: _failure, success: _success} = fold ->
           stack = Stack.push(stack, fold)
@@ -130,6 +146,7 @@ defmodule ZIO.FiberRuntime do
         if Enum.empty?(stack) do
           raise e
         else
+          #dbg(e)
           # TODO: Add stack information
           update_state(pid, %{state | current_zio: ZIO.die(e)})
         end
@@ -143,10 +160,16 @@ defmodule ZIO.FiberRuntime do
     run_loop(pid, state)
   end
 
-  defp continue(pid, %__MODULE__{stack: stack, observers: observers} = state, a) do
+  defp continue(pid, %__MODULE__{stack: _stack, observers: _observers} = _state, a) do
+    %__MODULE__{stack: stack, observers: observers} = state = get_state(pid)
+
     case stack do
       [] ->
+        #dbg("COMPLETED LOOP #{inspect pid}: notify obervers and set loop to false")
+        #dbg("OBSERVERS: #{inspect observers}")
+
         result = ZIO.Exit.succeed(a)
+        #dbg("EXIT RESULT: #{inspect result}")
         observers |> Enum.each(fn observer -> observer.(result) end)
 
         new_state = %{state | loop: false, result: result, observers: []}

@@ -1,7 +1,7 @@
 defmodule ZIO do
   use Monad
 
-  alias ZIO.{Cause, Exit, Stack, RetryStrategy}
+  alias ZIO.{Cause, Exit, RetryStrategy}
 
   ## ADTs
 
@@ -285,10 +285,9 @@ defmodule ZIO do
 
   def fork(zio) do
     ZIO.succeed(fn ->
-      {:ok, pid} = ZIO.FiberRuntime.start_link(zio)
-      dbg("fork - #{inspect pid}")
-      ZIO.FiberRuntime.start(pid)
-      pid
+      {:ok, pid} = ZIO.FiberRuntime.start_link()
+      #dbg("fork - #{inspect(pid)}")
+      ZIO.FiberRuntime.start(pid, zio)
     end)
   end
 
@@ -360,15 +359,44 @@ defmodule ZIO do
 
   # unsafeRunAsync
 
-  def unsafe_run(zio) do
-    {:ok, pid} = ZIO.FiberRuntime.start_link(zio)
-    dbg(pid)
-    ZIO.FiberRuntime.start(pid)
+  def unsafe_run_async(zio) do
+    {:ok, pid} = ZIO.FiberRuntime.start_link()
+    #dbg(pid)
+    ZIO.FiberRuntime.start(pid, zio)
+  end
+
+  def unsafe_run_sync(zio) do
+    {:ok, pid} = ZIO.FiberRuntime.start_link()
+    #dbg(pid)
+
+    result_pid = self()
+
+    final_zio =
+      zio
+      |> fold_cause_zio(
+        fn cause ->
+          ZIO.succeed(fn ->
+            send(result_pid, {:result, %ZIO.Exit.Failure{cause: cause}})
+          end)
+        end,
+        fn value ->
+          ZIO.succeed(fn ->
+            send(result_pid, {:result, %ZIO.Exit.Success{value: value}})
+          end)
+        end
+      )
+
+    ZIO.FiberRuntime.start(pid, final_zio)
+
+    receive do
+      {:result, result} ->
+        result
+    end
   end
 
   # A FiberRuntime takes zio and run
   def run_zio(zio) do
-    case unsafe_run(zio) do
+    case unsafe_run_sync(zio) do
       %ZIO.Exit.Success{value: value} -> {:ok, value}
       %ZIO.Exit.Failure{cause: cause} -> {:error, cause}
     end
