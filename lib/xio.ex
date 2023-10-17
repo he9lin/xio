@@ -221,6 +221,14 @@ defmodule ZIO do
     end)
   end
 
+  def collect_zio(zio_list) do
+    zio_list
+    |> Enum.reverse()
+    |> Enum.reduce(succeed_now([]), fn x, acc ->
+      zip_with(x, acc, fn x, acc -> [x | acc] end)
+    end)
+  end
+
   def tap_error(zio, f) do
     fold_zio(zio, fn e -> f.(e) |> zip_right(fail(e)) end, fn x -> succeed_now(x) end)
   end
