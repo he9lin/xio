@@ -22,7 +22,7 @@ defmodule Xio.MixProject do
   defp deps do
     [
       {:jason, "~> 1.0"},
-      {:monad, github: "he9lin/monad", ref: "339d2e"}
+      {:monad, github: "he9lin/monad", ref: "339d2e1"}
     ]
   end
 end
