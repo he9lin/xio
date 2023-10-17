@@ -49,13 +49,6 @@ defmodule ZIO.Env do
     end)
   end
 
-  defmodule Operators do
-    @spec Env.t() <|> Env.t() :: Env.t()
-    def %Env{env: env_1} <|> %Env{env: env_2} do
-      %Env{env: Map.merge(env_1, env_2)}
-    end
-  end
-
   defimpl Jason.Encoder, for: __MODULE__ do
     alias ZIO.Env
 
