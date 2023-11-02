@@ -52,12 +52,27 @@ defmodule ZIOTest do
     |> assert_zio_success(2)
   end
 
+  test "run >>> operator" do
+    import ZIO.Operator
+
+    ZIO.return(1)
+    >>> ZIO.return(2)
+    |> assert_zio_success(2)
+  end
+
   test "run ~> operator" do
     import ZIO.Operator
 
     ZIO.return(1)
-    ~> ZIO.return(2)
-    |> assert_zio_success(2)
+    ~> fn x -> ZIO.return(x + 1) end
+    ~> fn x -> ZIO.return(x * 2) end
+    |> assert_zio_success(4)
+
+
+    ZIO.environment(:a)
+    ~> fn x -> ZIO.return(x + 1) end
+    |> ZIO.run_with(Env.new(:a, 1))
+    |> dbg()
   end
 
   test "run zip" do
@@ -120,7 +135,7 @@ defmodule ZIOTest do
     |> ZIO.catch_all(fn e -> ZIO.print_line("CATCH IT: #{inspect(e)}") end)
     |> ZIO.fold_cause_zio(
       fn c ->
-        ZIO.print_line("Recovered from a cause #{inspect(c)}") ~> ZIO.return(1)
+        ZIO.print_line("Recovered from a cause #{inspect(c)}") >>> ZIO.return(1)
       end,
       fn _ -> ZIO.return(0) end
     )
